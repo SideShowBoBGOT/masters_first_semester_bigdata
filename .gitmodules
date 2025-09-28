@@ -1,0 +1,3 @@
+[submodule "lab_2/sampledata"]
+	path = lab_2/sampledata
+	url = https://github.com/fcerbell/sampledata.git
