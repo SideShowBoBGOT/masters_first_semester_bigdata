@@ -1,0 +1,241 @@
+import org.apache.{spark => spark}
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.{DataFrame, SparkSession}
+
+object Main {
+  // --- невеличка утиліта для таймінгу ---
+  private def timeIt[A](label: String)(f: => A)(implicit spark: SparkSession): A = {
+    val t0 = System.nanoTime()
+    val res = f
+    spark.sparkContext.runJob(spark.range(1).rdd, (_: Iterator[Long]) => {}) // бар'єр
+    val t1 = System.nanoTime()
+    println(f"[$label] took ${(t1 - t0)/1e3/1e3}%.1f ms")
+    res
+  }
+
+  def main(args: Array[String]): Unit = {
+    implicit val spark: SparkSession = spark.sql.SparkSession.builder()
+      .appName("PL<->FR paths <=2 stops")
+      .master(sys.props.getOrElse("spark.master", "local[*]"))
+      .config("spark.driver.memory", sys.props.getOrElse("spark.driver.memory","1g"))
+      .getOrCreate()
+
+    import spark.implicits._
+
+    // ===== INPUTS =====
+    val airportsPath = "sampledata/OpenFlights.org/airports-extended.dat"
+    val routesPath   = "sampledata/OpenFlights.org/routes.dat"
+
+    val csvOpts = Map(
+      "header" -> "false",
+      "inferSchema" -> "false",
+      "quote" -> "\"",
+      "escape" -> "\"",
+      "mode" -> "PERMISSIVE",
+      "multiLine" -> "false",
+      "ignoreLeadingWhiteSpace" -> "true",
+      "ignoreTrailingWhiteSpace" -> "true"
+    )
+
+    // ===== LOAD =====
+    val airports = spark.read.options(csvOpts).csv(airportsPath)
+      .select(
+        col("_c0").cast("long").as("airport_id"),
+        col("_c1").as("airport_name"),
+        col("_c3").as("country"),
+        col("_c6").cast("double").as("lat"),
+        col("_c7").cast("double").as("lon")
+      )
+      .filter($"airport_id".isNotNull && $"country".isNotNull && $"lat".isNotNull && $"lon".isNotNull)
+      .cache()
+
+    val routes = spark.read.options(csvOpts).csv(routesPath)
+      .select(
+        col("_c3").cast("long").as("src_id"),
+        col("_c5").cast("long").as("dst_id")
+      )
+      .filter($"src_id".isNotNull && $"dst_id".isNotNull)
+      .cache()
+
+    // корисні в’юхи
+    airports.createOrReplaceTempView("airports")
+    routes.createOrReplaceTempView("routes")
+
+    val pl = airports.filter($"country" === "Poland")
+      .select($"airport_id".as("pl_id"), $"airport_name".as("pl_name"))
+      .cache()
+    val fr = airports.filter($"country" === "France")
+      .select($"airport_id".as("fr_id"), $"airport_name".as("fr_name"))
+      .cache()
+
+    println(s"Polish airports: ${pl.count()}, French airports: ${fr.count()}")
+
+    // ===== 1) GRAPHFRAMES motif =====
+    val motifResult = timeIt("GraphFrames motif") {
+      val gfExists =
+        try { Class.forName("org.graphframes.GraphFrame"); true } catch { case _: Throwable => false }
+
+      if (!gfExists) {
+        println("GraphFrames not on classpath -> skipping motif. Add io.graphframes:graphframes-spark3_2.12:0.9.3")
+        Seq.empty[(Int, Seq[Long])]
+      } else {
+        import org.graphframes.GraphFrame
+
+        val v = airports.select(
+          $"airport_id".as("id"),
+          $"airport_name".as("name"),
+          $"country"
+        )
+        val e = routes.select(
+          $"src_id".as("src"),
+          $"dst_id".as("dst")
+        )
+
+        val g = GraphFrame(v, e)
+
+        // 0 стиковок (1 сегмент)
+        val p0 = g.find(" (a)-[e1]->(b) ")
+          .filter("a.country = 'Poland' AND b.country = 'France' AND a.id <> b.id")
+          .select(array($"a.id", $"b.id").as("path"))
+
+        // 1 стиковка (2 сегменти)
+        val p1 = g.find(" (a)-[e1]->(m1); (m1)-[e2]->(b) ")
+          .filter("""
+              a.country = 'Poland' AND b.country = 'France'
+              AND a.id <> m1.id AND m1.id <> b.id AND a.id <> b.id
+            """)
+          .select(array($"a.id", $"m1.id", $"b.id").as("path"))
+
+        // 2 стиковки (3 сегменти)
+        val p2 = g.find(" (a)-[e1]->(m1); (m1)-[e2]->(m2); (m2)-[e3]->(b) ")
+          .filter("""
+              a.country = 'Poland' AND b.country = 'France'
+              AND a.id <> m1.id AND a.id <> m2.id AND a.id <> b.id
+              AND m1.id <> m2.id AND m1.id <> b.id
+              AND m2.id <> b.id
+            """)
+          .select(array($"a.id", $"m1.id", $"m2.id", $"b.id").as("path"))
+
+        val all = p0.withColumn("stops", lit(0))
+          .unionByName(p1.withColumn("stops", lit(1)))
+          .unionByName(p2.withColumn("stops", lit(2)))
+          .distinct()
+
+        val (c0, c1, c2, ct) = (p0.count(), p1.count(), p2.count(), all.count())
+        println(s"[motif] 0 stops: $c0, 1 stop: $c1, 2 stops: $c2, total: $ct")
+
+        // покажемо 10 прикладів
+        all.limit(10).collect().foreach { r =>
+          val path = r.getAs[Seq[Long]]("path")
+          val stops = r.getAs[Int]("stops")
+          println(s"[motif][$stops stops] " + path.mkString(" -> "))
+        }
+        // повернемо як “щось”, але основне — вже надруковано
+        all.collect().toSeq.map(r => (r.getAs[Int]("stops"), r.getAs[Seq[Long]]("path")))
+      }
+    }
+
+    // ===== 2) SQL self-joins (без GraphFrames) =====
+    val sqlResult = timeIt("Spark SQL self-joins") {
+      // 0 стиковок
+      val q0 =
+        routes.join(pl, $"src_id" === $"pl_id")
+              .join(fr, $"dst_id" === $"fr_id")
+              .select(array($"pl_id".cast("long"), $"dst_id").as("path"))
+              .distinct()
+
+      // 1 стиковка
+      val q1 =
+        routes.as("r1")
+          .join(routes.as("r2"), $"r1.dst_id" === $"r2.src_id")
+          .join(pl, $"r1.src_id" === $"pl_id")
+          .join(fr, $"r2.dst_id" === $"fr_id")
+          .where($"pl_id" =!= $"r1.dst_id" && $"r1.dst_id" =!= $"r2.dst_id" && $"pl_id" =!= $"r2.dst_id")
+          .select(array($"pl_id".cast("long"), $"r1.dst_id", $"r2.dst_id").as("path"))
+          .distinct()
+
+      // 2 стиковки
+      val q2 =
+        routes.as("r1")
+          .join(routes.as("r2"), $"r1.dst_id" === $"r2.src_id")
+          .join(routes.as("r3"), $"r2.dst_id" === $"r3.src_id")
+          .join(pl, $"r1.src_id" === $"pl_id")
+          .join(fr, $"r3.dst_id" === $"fr_id")
+          .where(
+            $"pl_id" =!= $"r1.dst_id" &&
+            $"pl_id" =!= $"r2.dst_id" &&
+            $"pl_id" =!= $"r3.dst_id" &&
+            $"r1.dst_id" =!= $"r2.dst_id" &&
+            $"r1.dst_id" =!= $"r3.dst_id" &&
+            $"r2.dst_id" =!= $"r3.dst_id"
+          )
+          .select(array($"pl_id".cast("long"), $"r1.dst_id", $"r2.dst_id", $"r3.dst_id").as("path"))
+          .distinct()
+
+      val all = q0.withColumn("stops", lit(0))
+        .unionByName(q1.withColumn("stops", lit(1)))
+        .unionByName(q2.withColumn("stops", lit(2)))
+        .distinct()
+
+      val (c0, c1, c2, ct) = (q0.count(), q1.count(), q2.count(), all.count())
+      println(s"[sql] 0 stops: $c0, 1 stop: $c1, 2 stops: $c2, total: $ct")
+      all.limit(10).collect().foreach { r =>
+        val path = r.getAs[Seq[Long]]("path"); val s = r.getAs[Int]("stops")
+        println(s"[sql][$s stops] " + path.mkString(" -> "))
+      }
+      all
+    }
+
+    // ===== 3) GraphX / RDD розширення шляхів до 3 ребер =====
+    val graphxResult = timeIt("GraphX path expand (<=3 hops)") {
+      val plIds = pl.select($"pl_id".cast("long")).as[Long].collect().toSet
+      val frIds = fr.select($"fr_id".cast("long")).as[Long].collect().toSet
+      val bFr   = spark.sparkContext.broadcast(frIds)
+
+      // adjacency map (src -> Set(dst))
+      val adj = routes.rdd
+        .map(r => (r.getLong(0), r.getLong(1)))
+        .groupByKey()
+        .mapValues(_.toSet)
+        .collectAsMap()
+      val bAdj = spark.sparkContext.broadcast(adj)
+
+      // стартові шляхи: по одному вузлу (будь-який PL)
+      var paths = spark.sparkContext.parallelize(plIds.toSeq).map(id => Seq(id))
+
+      // функція розширення на 1 крок без повторів вузлів
+      def step(cur: spark.rdd.RDD[Seq[Long]]): spark.rdd.RDD[Seq[Long]] =
+        cur.flatMap { path =>
+          val last = path.last
+          bAdj.value.getOrElse(last, Set.empty[Long]).iterator
+            .filterNot(path.contains) // уникаємо циклів
+            .map(next => path :+ next)
+        }
+
+      // 1 крок (прямі)
+      val p1 = step(paths)
+      val direct = p1.filter(p => bFr.value.contains(p.last)).map(p => (0, p))
+
+      // 2 кроки (1 стиковка)
+      val p2 = step(p1)
+      val oneStop = p2.filter(p => bFr.value.contains(p.last)).map(p => (1, p))
+
+      // 3 кроки (2 стиковки)
+      val p3 = step(p2)
+      val twoStops = p3.filter(p => bFr.value.contains(p.last)).map(p => (2, p))
+
+      val all = direct.union(oneStop).union(twoStops).distinct().cache()
+      val (c0, c1, c2, ct) = (
+        direct.count(), oneStop.count(), twoStops.count(), all.count()
+      )
+      println(s"[graphx] 0 stops: $c0, 1 stop: $c1, 2 stops: $c2, total: $ct")
+      all.take(10).foreach { case (s, p) =>
+        println(s"[graphx][$s stops] " + p.mkString(" -> "))
+      }
+      all
+    }
+
+    spark.stop()
+  }
+}
+

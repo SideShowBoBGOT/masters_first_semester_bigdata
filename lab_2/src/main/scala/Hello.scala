@@ -286,72 +286,154 @@ object Main {
     sparkSession.stop()
   }
 
+  def taskTwoGraphFrames() = {
+    val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
+    timeIt(sparkSession, "taskTwoGraphFrames") {
+
+      import sparkSession.implicits._
+
+      val airportsV = readAirports(
+        sparkSession,
+        Vector(AirportField.Id, AirportField.Country)
+      )
+      .distinct()
+
+      val routesE = readRoutes(
+        sparkSession,
+        Vector(RouteField.SourceAirportId, RouteField.DestAirportId)
+      )
+        .select(
+          $"src_id".as("src"),
+          $"dest_id".as("dst")
+        )
+        .distinct()
+
+      import org.graphframes.GraphFrame
+
+      val g = GraphFrame(airportsV, routesE)
+
+      def onewayAnalyze(srcCountry: String, destCountry: String) = {
+        val p0 = g.find(" (a)-[e1]->(b) ")
+          .filter(
+            s"""
+              a.country = '$srcCountry' AND b.country = '$destCountry'
+              AND a.id <> b.id
+            """
+          )
+          .select(spark.sql.functions.array($"a.id", $"b.id").as("path"))
+
+        val p1 = g.find(" (a)-[e1]->(m1); (m1)-[e2]->(b) ")
+          .filter(
+            s"""
+              a.country = '$srcCountry' AND b.country = '$destCountry'
+              AND a.id <> m1.id AND m1.id <> b.id AND a.id <> b.id
+            """
+          )
+          .select(spark.sql.functions.array($"a.id", $"m1.id", $"b.id").as("path"))
+
+        val p2 = g.find(" (a)-[e1]->(m1); (m1)-[e2]->(m2); (m2)-[e3]->(b) ")
+          .filter(
+            s"""
+              a.country = '$srcCountry' AND b.country = '$destCountry'
+              AND a.id <> m1.id AND a.id <> m2.id AND a.id <> b.id
+              AND m1.id <> m2.id AND m1.id <> b.id
+              AND m2.id <> b.id
+            """)
+          .select(spark.sql.functions.array($"a.id", $"m1.id", $"m2.id", $"b.id").as("path"))
+
+        p0.withColumn("stops", spark.sql.functions.lit(0))
+          .unionByName(p1.withColumn("stops", spark.sql.functions.lit(1)))
+          .unionByName(p2.withColumn("stops", spark.sql.functions.lit(2)))
+      }
+      val srcCountry = "Poland"
+      val destCountry = "France"
+
+      val all = onewayAnalyze(srcCountry, destCountry)
+        .unionByName(onewayAnalyze(destCountry, srcCountry))
+        .distinct()
+
+      all.limit(1000).collect().foreach { r =>
+          val path = r.getAs[Seq[Long]]("path")
+          val stops = r.getAs[Int]("stops")
+          println(s"[motif][$stops stops] " + path.mkString(" -> "))
+      }
+      all
+    }
+    sparkSession.stop()
+  }
+
   def taskTwoSql() = {
     val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
-    val airports = readAirports(sparkSession, Vector(AirportField.Id, AirportField.Country))
-    val routes = readRoutes(
-      sparkSession,
-      Vector(
-        RouteField.AirlineId,
-        RouteField.SourceAirportId,
-        RouteField.DestAirportId
-      )
-    )
-    import sparkSession.implicits._
-    
-    def onewayAnalyze(srcCountry: String, destCountry: String) = {
-      val airportsSrc = airports.filter($"country" === srcCountry)
-        .as("asrc")
-        .cache()
-
-      val airportsDest = airports.filter($"country" === destCountry)
-        .as("adest")
-        .cache()
-      
-      val r0 = routes.as("r0")
-      val q0 = r0
-        .join(airportsSrc, $"asrc.id" === $"r0.src_id")
-        .join(airportsDest, $"adest.id" === $"r0.dest_id")
-        .select(spark.sql.functions.array($"asrc.id", $"adest.id").as("path"))
-      
-      val r1 = routes.as("r1")
-      val q1 = r0
-        .join(r1, $"r0.dest_id" === $"r1.src_id")
-        .join(airportsSrc, $"asrc.id" === $"r0.src_id")
-        .join(airportsDest, $"adest.id" === $"r1.dest_id")
-        .where(
-          $"r0.dest_id" =!= $"asrc.id"
-          && $"r0.dest_id" =!= $"adest.id" 
-          && $"r1.src_id" =!= $"asrc.id"
-          && $"r1.src_id" =!= $"adest.id" 
-        )
-        .select(spark.sql.functions.array($"r0.src_id", $"r0.dest_id", $"r1.dest_id").as("path"))
-
-      val r2 = routes.as("r2")
-      val q2 = r0
-        .join(r1, $"r0.dest_id" === $"r1.src_id")
-        .join(r2, $"r1.dest_id" === $"r2.src_id")
-        .join(airportsSrc, $"asrc.id" === $"r0.src_id")
-        .join(airportsDest, $"adest.id" === $"r2.dest_id")
-        .where(
-          $"r0.dest_id" =!= $"asrc.id"
-          && $"r0.dest_id" =!= $"adest.id" 
-          && $"r1.src_id" =!= $"asrc.id"
-          && $"r1.src_id" =!= $"adest.id" 
-          && $"r1.dest_id" =!= $"asrc.id"
-          && $"r1.dest_id" =!= $"adest.id"
-          && $"r2.src_id" =!= $"asrc.id"
-          && $"r2.src_id" =!= $"adest.id" 
-        )
-        .select(spark.sql.functions.array($"r0.src_id", $"r0.dest_id", $"r1.dest_id", $"r2.dest_id").as("path"))
-
-        val q0l = q0.withColumn("stops", spark.sql.functions.lit(0))
-        val q1l = q1.withColumn("stops", spark.sql.functions.lit(1))
-        val q2l = q2.withColumn("stops", spark.sql.functions.lit(2))
-        val all = q0l.unionByName(q1l).unionByName(q2l)
-        all
-    }
     timeIt(sparkSession, "taskTwoSql") {
+      val airports = readAirports(
+        sparkSession,
+        Vector(AirportField.Id, AirportField.Country)
+      )
+      .distinct()
+
+      val routes = readRoutes(
+        sparkSession,
+        Vector(
+          RouteField.SourceAirportId,
+          RouteField.DestAirportId
+        )
+      )
+      .distinct()
+
+      import sparkSession.implicits._
+      
+      def onewayAnalyze(srcCountry: String, destCountry: String) = {
+        val airportsSrc = airports.filter($"country" === srcCountry)
+          .as("asrc")
+          .cache()
+
+        val airportsDest = airports.filter($"country" === destCountry)
+          .as("adest")
+          .cache()
+        
+        val r0 = routes.as("r0")
+        val q0 = r0
+          .join(airportsSrc, $"asrc.id" === $"r0.src_id")
+          .join(airportsDest, $"adest.id" === $"r0.dest_id")
+          .select(spark.sql.functions.array($"asrc.id", $"adest.id").as("path"))
+        
+        val r1 = routes.as("r1")
+        val q1 = r0
+          .join(r1, $"r0.dest_id" === $"r1.src_id")
+          .join(airportsSrc, $"asrc.id" === $"r0.src_id")
+          .join(airportsDest, $"adest.id" === $"r1.dest_id")
+          .where(
+            $"r0.dest_id" =!= $"asrc.id"
+            && $"r0.dest_id" =!= $"adest.id" 
+            && $"r1.src_id" =!= $"asrc.id"
+            && $"r1.src_id" =!= $"adest.id" 
+          )
+          .select(spark.sql.functions.array($"r0.src_id", $"r0.dest_id", $"r1.dest_id").as("path"))
+
+        val r2 = routes.as("r2")
+        val q2 = r0
+          .join(r1, $"r0.dest_id" === $"r1.src_id")
+          .join(r2, $"r1.dest_id" === $"r2.src_id")
+          .join(airportsSrc, $"asrc.id" === $"r0.src_id")
+          .join(airportsDest, $"adest.id" === $"r2.dest_id")
+          .where(
+            $"r0.dest_id" =!= $"asrc.id"
+            && $"r0.dest_id" =!= $"adest.id" 
+            && $"r1.src_id" =!= $"asrc.id"
+            && $"r1.src_id" =!= $"adest.id" 
+            && $"r1.dest_id" =!= $"asrc.id"
+            && $"r1.dest_id" =!= $"adest.id"
+            && $"r2.src_id" =!= $"asrc.id"
+            && $"r2.src_id" =!= $"adest.id" 
+          )
+          .select(spark.sql.functions.array($"r0.src_id", $"r0.dest_id", $"r1.dest_id", $"r2.dest_id").as("path"))
+
+          val q0l = q0.withColumn("stops", spark.sql.functions.lit(0))
+          val q1l = q1.withColumn("stops", spark.sql.functions.lit(1))
+          val q2l = q2.withColumn("stops", spark.sql.functions.lit(2))
+          val all = q0l.unionByName(q1l).unionByName(q2l)
+          all
+      }
       val srcCountry = "Poland"
       val destCountry = "France"
       val all = onewayAnalyze(srcCountry, destCountry)
@@ -370,6 +452,7 @@ object Main {
   }
 
   def main(args: Array[String]): Unit = {
-    taskTwoSql();
+    taskTwoGraphFrames();
+    // taskTwoSql();
   }
 }
