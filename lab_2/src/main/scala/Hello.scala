@@ -198,6 +198,18 @@ object Main {
   def readRoutes(sparkSession: spark.sql.SparkSession, fields: Vector[RouteField]) = {
     readData(sparkSession, "routes.dat", fields)
   }
+
+  def haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double = {
+    val R = 6371.0088 
+    val dLat = Math.toRadians(lat2 - lat1)
+    val dLon = Math.toRadians(lon2 - lon1)
+    val a = Math.pow(Math.sin(dLat / 2), 2) +
+      Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+        Math.pow(Math.sin(dLon / 2), 2)
+    val c = 2 * Math.asin(Math.min(1.0, Math.sqrt(a)))
+    R * c
+  }
+
   def taskOne(): Unit = {
     val sparkSession = spark.sql.SparkSession.builder()
       .appName("local").getOrCreate()
@@ -233,17 +245,6 @@ object Main {
     }
     .collectAsMap();
         
-    def haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double = {
-      val R = 6371.0088 
-      val dLat = Math.toRadians(lat2 - lat1)
-      val dLon = Math.toRadians(lon2 - lon1)
-      val a = Math.pow(Math.sin(dLat / 2), 2) +
-        Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
-          Math.pow(Math.sin(dLon / 2), 2)
-      val c = 2 * Math.asin(Math.min(1.0, Math.sqrt(a)))
-      R * c
-    }
-
     val edges = readRoutes(
       sparkSession,
       Vector(
@@ -450,9 +451,104 @@ object Main {
     } 
     sparkSession.stop()
   }
+  def taskThree() = {
+    val sparkSession = spark.sql.SparkSession.builder()
+      .appName("local").getOrCreate()
 
+    val airportsDf = readAirports(
+      sparkSession,
+      Vector(
+        AirportField.Id,
+        AirportField.Latitude,
+        AirportField.Longitude
+      )
+    );
+    val vertices = airportsDf.rdd.map { r =>
+        (
+          r.getAs[Long](AirportField.Id.name),
+          (
+            r.getAs[Double](AirportField.Latitude.name),
+            r.getAs[Double](AirportField.Longitude.name)
+          )
+        )
+      }
+    
+    val airportCoordMap = airportsDf.rdd.map{ r =>
+      (
+        r.getAs[Long](AirportField.Id.name),
+        (
+          r.getAs[Double](AirportField.Latitude.name),
+          r.getAs[Double](AirportField.Longitude.name)
+        )
+      )
+    }
+    .collectAsMap();
+        
+    val edges = readRoutes(
+      sparkSession,
+        Vector(
+          RouteField.SourceAirportId,
+          RouteField.DestAirportId
+        )
+      )
+      .rdd.flatMap { r =>
+        val srcId = r.getLong(1)
+        val dstId = r.getLong(2)
+        (airportCoordMap.get(srcId), airportCoordMap.get(dstId)) match {
+          case (Some((slat, slon)), Some((dlat, dlon))) =>
+            val dist = haversineKm(slat, slon, dlat, dlon)
+            if (dist.isNaN || dist <= 0.0) None
+            else Some(spark.graphx.Edge(srcId, dstId, dist))
+          case _ => None
+        }
+      }
+    
+    val graph = spark.graphx.Graph(vertices, edges)
+  }
+  def taskSix() = {
+    val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
+    import sparkSession.implicits._
+
+    val airportsDf = readAirports(
+      sparkSession,
+      Vector(
+        AirportField.Id,
+        AirportField.Name,
+        AirportField.Country
+      )
+    )
+    val vertices = airportsDf.rdd.map { r =>
+      (r.getLong(0), (r.getString(1), r.getString(2)))
+    }
+
+    val edges = readRoutes(
+      sparkSession,
+        Vector(
+          RouteField.SourceAirportId,
+          RouteField.DestAirportId
+        )
+    ).rdd.map { r =>
+      spark.graphx.Edge(r.getLong(0), r.getLong(1), ())
+    }
+    val graph = spark.graphx.Graph(vertices, edges)
+    val tol = 0.00001
+    val ranks = graph.pageRank(tol).vertices
+
+    val labeled = ranks.join(vertices)
+      .map { case (id, (rank, (name, country))) => (id, name, country, rank) }
+
+    val top10 = labeled.takeOrdered(10)(Ordering.by[(Long,String,String,Double), Double](-_._4))
+
+    println("\n=== PageRank: Top 10 airports ===")
+    top10.zipWithIndex.foreach { case ((id, name, country, rank), i) =>
+      println(f"${i+1}%2d) id=$id%6d  PR=${rank}%.6f  $name ($country)")
+    }
+
+    sparkSession.stop()
+  }
   def main(args: Array[String]): Unit = {
-    taskTwoGraphFrames();
-    // taskTwoSql();
+    taskSix()
+    // taskTwoGraphFrames()
+    // taskTwoSql()
   }
 }
