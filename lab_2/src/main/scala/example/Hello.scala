@@ -89,8 +89,8 @@ object Main {
 
     val airportsDf = readAirports(sparkSession);
     val vertices = airportsDf.rdd.map { r =>
-        val id  = r.getAs[Long]("airport_id_l")
-        val nm  = r.getAs[String]("airport_name")
+        val id  = r.getAs[Long]("id_l")
+        val nm  = r.getAs[String]("name")
         val lat = r.getAs[Double]("lat_d")
         val lon = r.getAs[Double]("lon_d")
         (id, (nm, lat, lon))
@@ -145,6 +145,13 @@ object Main {
     topMin.foreach { case (id, sumKm) =>
       println(f"MIN total distance: ${nameOf(id)} (airline_id=$id) -> ${sumKm}%.2f km")
     }
+
+    sparkSession.stop()
+  }
+
+  def taskTwoGraphX() = {
+    val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
+     
 
     sparkSession.stop()
   }
