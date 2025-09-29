@@ -505,6 +505,52 @@ object Main {
     
     val graph = spark.graphx.Graph(vertices, edges)
   }
+  def taskFive() = {
+    val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
+    val airportsDf = readAirports(
+      sparkSession,
+      Vector(
+        AirportField.Id,
+        AirportField.Name,
+        AirportField.Country
+      )
+    )
+    val vertices = airportsDf.rdd.map { r =>
+      (r.getLong(0), (r.getString(1), r.getString(2)))
+    }
+
+    val edges = readRoutes(
+      sparkSession,
+        Vector(
+          RouteField.SourceAirportId,
+          RouteField.DestAirportId
+        )
+    ).rdd.map { r =>
+      spark.graphx.Edge(r.getLong(0), r.getLong(1), ())
+    }
+    val graph = spark.graphx.Graph(vertices, edges)
+    val cc = graph.connectedComponents().vertices
+
+    val labeled = cc.join(vertices).map {
+      case (id, (compId, (name, country))) =>
+        (compId, (id, name, country))
+    }
+
+    val clusters = labeled.groupByKey()
+      .mapValues(_.toSeq)
+      .filter { case (_, members) => members.size >= 5 }
+
+    val sortedClusters = clusters.sortByKey()
+
+    sortedClusters.take(10).foreach { case (compId, members) =>
+      println(s"Cluster $compId (size=${members.size}):")
+      members.take(10).foreach { case (id, name, country) =>
+        println(s"  $id $name ($country)")
+      }
+    }
+
+    sparkSession.stop()
+  }
   def taskSix() = {
     val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
     import sparkSession.implicits._
@@ -547,7 +593,8 @@ object Main {
     sparkSession.stop()
   }
   def main(args: Array[String]): Unit = {
-    taskSix()
+    taskFive()
+    // taskSix()
     // taskTwoGraphFrames()
     // taskTwoSql()
   }
