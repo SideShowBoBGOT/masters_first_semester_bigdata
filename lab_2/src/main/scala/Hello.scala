@@ -67,7 +67,6 @@ object Main {
   def readAirports(sparkSession: spark.sql.SparkSession) = {
     
     sparkSession.read.options(csvOpts).csv(sampledataOpenFlightsOrg + "airports-extended.dat")
-      spark.sql.functions.col
       .select(
         spark.sql.functions.col("_c0").as("id"),
         spark.sql.functions.col("_c1").as("name"),
