@@ -13,8 +13,61 @@ object Main {
     "ignoreLeadingWhiteSpace" -> "true",
     "ignoreTrailingWhiteSpace" -> "true"
   );
+  sealed trait SqlField {
+    def sqlType: spark.sql.types.DataType
+    def name: String
+  }
+  sealed trait AirportField extends SqlField
+  object AirportField {
+    case object Id extends AirportField {
+      val sqlType = spark.sql.types.LongType
+      val name = "id"
+    }
+    case object Name extends AirportField {
+      val sqlType = spark.sql.types.StringType
+      val name = "name"
+    }
+    case object City extends AirportField {
+      val sqlType = spark.sql.types.StringType
+      val name = "city"
+    }
+    case object Country extends AirportField {
+      val sqlType = spark.sql.types.StringType
+      val name = "city"
+    }
+    case object IATA extends AirportField {
+      val sqlType = spark.sql.types.StringType
+      val name = "iata"
+    }
+    case object ICAO extends AirportField {
+      val sqlType = spark.sql.types.StringType
+      val name = "icao"
+    }
+    case object Latitude extends AirportField {
+      val sqlType = spark.sql.types.DoubleType
+      val name = "latitude"
+    }
+    case object Longitude extends AirportField {
+      val sqlType = spark.sql.types.DoubleType
+      val name = "longitude"
+    }
+    case object Altitude extends AirportField {
+      val sqlType = spark.sql.types.DoubleType
+      val name = "altitude"
+    }
+    case object TimezoneOffset extends AirportField {
+      val sqlType = spark.sql.types.IntegerType
+      val name = "timezone_offset"
+    }
+    case object DaylightSavingTime extends AirportField {
+      val sqlType = spark.sql.types.StringType
+      val name = "daylight_saving_time"
+    }
+  }
   def readAirports(sparkSession: spark.sql.SparkSession) = {
+    
     sparkSession.read.options(csvOpts).csv(sampledataOpenFlightsOrg + "airports-extended.dat")
+      spark.sql.functions.col
       .select(
         spark.sql.functions.col("_c0").as("id"),
         spark.sql.functions.col("_c1").as("name"),
@@ -22,7 +75,7 @@ object Main {
         spark.sql.functions.col("_c3").as("country"),
         spark.sql.functions.col("_c6").as("lat"),
         spark.sql.functions.col("_c7").as("lon"),
-        spark.sql.functions.col("_c11").as("type"),
+        // spark.sql.functions.col("_c11").as("type"),
       )
       .filter(
         spark.sql.functions.col("id").isNotNull
@@ -81,7 +134,8 @@ object Main {
       .withColumn("airline_id_l", spark.sql.functions.col("airline_id").cast(spark.sql.types.LongType))
       .withColumn("src_id_l", spark.sql.functions.col("src_id").cast(spark.sql.types.LongType))
       .withColumn("dst_id_l", spark.sql.functions.col("dst_id").cast(spark.sql.types.LongType))
-      .select("airline_id_l", "src_id_l", "dst_id_l")
+      .withColumn("stops_l", spark.sql.functions.col("stops").cast(spark.sql.types.LongType))
+      .select("airline_id_l", "src_id_l", "dst_id_l", "stops_l")
   }
   def taskOne(): Unit = {
     val sparkSession = spark.sql.SparkSession.builder()
@@ -151,7 +205,9 @@ object Main {
 
   def taskTwoGraphX() = {
     val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
-     
+    readRoutes(sparkSession).rdd.map { r =>
+      r.getAs[Long]("src_id_l") 
+    } 
 
     sparkSession.stop()
   }
