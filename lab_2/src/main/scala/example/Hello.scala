@@ -13,22 +13,16 @@ object Main {
     "ignoreLeadingWhiteSpace" -> "true",
     "ignoreTrailingWhiteSpace" -> "true"
   );
-  def readAirportsExtended(sparkSession: spark.sql.SparkSession): spark.sql.DataFrame = {
-    sparkSession.read.options(csvOpts).csv(sampledataOpenFlightsOrg + "airpports-extended.dat")
+  def readAirports(sparkSession: spark.sql.SparkSession) = {
+    sparkSession.read.options(csvOpts).csv(sampledataOpenFlightsOrg + "airports-extended.dat")
       .select(
         spark.sql.functions.col("_c0").as("id"),
         spark.sql.functions.col("_c1").as("name"),
         spark.sql.functions.col("_c2").as("city"),
         spark.sql.functions.col("_c3").as("country"),
-        // spark.sql.functions.col("_c4").as("iata"),
-        // spark.sql.functions.col("_c5").as("icao"),
         spark.sql.functions.col("_c6").as("lat"),
         spark.sql.functions.col("_c7").as("lon"),
-        // spark.sql.functions.col("_c8").as("alt"),
-        // spark.sql.functions.col("_c9").as("to"),
-        // spark.sql.functions.col("_c10").as("dst"),
         spark.sql.functions.col("_c11").as("type"),
-        // spark.sql.functions.col("_c12").as("src"),
       )
       .filter(
         spark.sql.functions.col("id").isNotNull
@@ -46,9 +40,8 @@ object Main {
       .withColumn("lat_d", spark.sql.functions.col("lat").cast(spark.sql.types.DoubleType))
       .withColumn("lon_d", spark.sql.functions.col("lon").cast(spark.sql.types.DoubleType))
       .select("id_l", "name", "lat_d", "lon_d")
-      .cache()
   }
-  def readAirlines(sparkSession: spark.sql.SparkSession): spark.sql.DataFrame = {
+  def readAirlines(sparkSession: spark.sql.SparkSession) = {
     sparkSession.read.options(csvOpts).csv(sampledataOpenFlightsOrg + "airlines.dat")
       .select(
         spark.sql.functions.col("_c0").as("id"),
@@ -64,12 +57,8 @@ object Main {
       )
       .withColumn("id_l", spark.sql.functions.col("id").cast(spark.sql.types.LongType))
       .select("id_l", "name")
-      .rdd
-      .map(r => (r.getLong(0), r.getString(1)))
-      .collect()
-      .toMap
   }
-  def readRoutes(sparkSession: spark.sql.SparkSession): spark.sql.DataFrame = {
+  def readRoutes(sparkSession: spark.sql.SparkSession) = {
     sparkSession.read.options(csvOpts).csv(sampledataOpenFlightsOrg + "routes.dat")
       .select(
         spark.sql.functions.col("_c1").as("airline_id"),
@@ -96,17 +85,10 @@ object Main {
   }
   def taskOne(): Unit = {
     val sparkSession = spark.sql.SparkSession.builder()
-      .appName("AirlinesDistanceGraphX")
-      .getOrCreate()
+      .appName("local").getOrCreate()
 
-    val airportsPath = "sampledata/OpenFlights.org/airports-extended.dat"
-    val airlinesPath = "sampledata/OpenFlights.org/airlines.dat"
-    val routesPath   = "sampledata/OpenFlights.org/routes.dat"
-    
-    
-        
-    val vertices: spark.rdd.RDD[(spark.graphx.VertexId, (String, Double, Double))] =
-      airportsDF.rdd.map { r =>
+    val airportsDf = readAirports(sparkSession);
+    val vertices = airportsDf.rdd.map { r =>
         val id  = r.getAs[Long]("airport_id_l")
         val nm  = r.getAs[String]("airport_name")
         val lat = r.getAs[Double]("lat_d")
@@ -114,15 +96,11 @@ object Main {
         (id, (nm, lat, lon))
       }
     
-    val airportCoordMap = airportsDF
-      .select("airport_id_l", "lat_d", "lon_d")
+    val airportCoordMap = airportsDf
+      .select("id_l", "lat_d", "lon_d")
       .rdd
       .map(r => (r.getLong(0), (r.getDouble(1), r.getDouble(2))))
-      .collectAsMap()
-    val bAirportCoords = sparkSession.sparkContext.broadcast(airportCoordMap)
-   
-        val bAirlines = sparkSession.sparkContext.broadcast(airlinesMap)
-
+      .collectAsMap();
         
     def haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double = {
       val R = 6371.0088 
@@ -134,15 +112,14 @@ object Main {
       val c = 2 * Math.asin(Math.min(1.0, Math.sqrt(a)))
       R * c
     }
-    val edges = routesDF.rdd.flatMap { r =>
+
+    val edges = readRoutes(sparkSession).rdd.flatMap { r =>
       val airlineId = r.getLong(0)
-      val srcId     = r.getLong(1)
-      val dstId     = r.getLong(2)
-      val coords    = bAirportCoords.value
-      (coords.get(srcId), coords.get(dstId)) match {
+      val srcId = r.getLong(1)
+      val dstId = r.getLong(2)
+      (airportCoordMap.get(srcId), airportCoordMap.get(dstId)) match {
         case (Some((slat, slon)), Some((dlat, dlon))) =>
           val dist = haversineKm(slat, slon, dlat, dlon)
-          
           if (dist.isNaN || dist <= 0.0) None
           else Some(spark.graphx.Edge(srcId, dstId, EdgeAttr(airlineId, dist)))
         case _ => None
@@ -150,15 +127,17 @@ object Main {
     }
     
     val graph = spark.graphx.Graph(vertices, edges)
-    val totalsByAirline: spark.rdd.RDD[(Long, Double)] =
-      graph.edges.map(e => (e.attr.airlineId, e.attr.distanceKm))
-        .reduceByKey(_ + _)
-        .cache()
+    val totalsByAirline = graph.edges.map(e => (e.attr.airlineId, e.attr.distanceKm))
+        .reduceByKey(_ + _).cache()
     
     val topMax = totalsByAirline.takeOrdered(1)(Ordering.by[(Long, Double), Double](-_._2)).headOption
     val topMin = totalsByAirline.takeOrdered(1)(Ordering.by[(Long, Double), Double](_._2)).headOption
 
-    def nameOf(id: Long): String = bAirlines.value.getOrElse(id, s"Airline#$id")
+    val airlines = readAirlines(sparkSession).rdd.map { r =>
+      (r.getLong(0), r.getString(1))
+    }.collect().toMap
+
+    def nameOf(id: Long): String = airlines.getOrElse(id, s"Airline#$id")
 
     topMax.foreach { case (id, sumKm) =>
       println(f"MAX total distance: ${nameOf(id)} (airline_id=$id) -> ${sumKm}%.2f km")
