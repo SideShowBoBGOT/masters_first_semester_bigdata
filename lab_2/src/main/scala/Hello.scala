@@ -592,8 +592,71 @@ object Main {
 
     sparkSession.stop()
   }
+
+  def showClusters(
+    airportIdWithComponentIdRdd: spark.graphx.VertexRDD[Long],
+    vertices: spark.rdd.RDD[(Long, (String, String))],
+    title: String,
+    minSize: Int = 2,
+    topN: Int = 10
+  ): Unit = {
+
+    val filteredComponentIds = airportIdWithComponentIdRdd.map { case (_, cid) => (cid, 1) }.reduceByKey(_ + _)
+      .filter { case (cid, sz) => sz >= minSize }
+      .map(_._1)
+
+    airportIdWithComponentIdRdd.map { case (airportId, componentId) => (componentId, airportId) }
+      .join(filteredComponentIds.map((_, ())))
+      .map { case (componentId, (airportId, _)) => (airportId, componentId) }
+      .join(vertices)
+      .map { case (airportId, (componentId, (name, country))) => (componentId, (airportId, name, country)) }
+      .groupByKey()
+      .mapValues(_.toArray)
+      .foreach { case (componentId, info) =>
+        println(s"Component $componentId (size=${info.size})")
+        info
+          .take(topN)
+          .foreach { case (airportId, name, country) =>
+          println(s"  $airportId $name ($country)")
+        }
+      }
+  }
+  def taskSevenConnectedComponents() = {
+    val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
+    import sparkSession.implicits._
+
+    val airportsDf = readAirports(
+      sparkSession,
+      Vector(
+        AirportField.Id,
+        AirportField.Name,
+        AirportField.Country
+      )
+    )
+    val vertices = airportsDf.rdd.map { r =>
+      (r.getLong(0), (r.getString(1), r.getString(2)))
+    }
+
+    val edges = readRoutes(
+      sparkSession,
+        Vector(
+          RouteField.SourceAirportId,
+          RouteField.DestAirportId
+        )
+    ).rdd.map { r =>
+      spark.graphx.Edge(r.getLong(0), r.getLong(1), ())
+    }
+    val graph = spark.graphx.Graph(vertices, edges)
+    val cc = graph.connectedComponents().vertices
+    showClusters(cc, vertices, "connectedComponents")
+    sparkSession.stop()
+  }
+  def taskSevenLabelPropagation() = {
+
+  }
   def main(args: Array[String]): Unit = {
-    taskFive()
+    taskSevenConnectedComponents()
+    // taskFive()
     // taskSix()
     // taskTwoGraphFrames()
     // taskTwoSql()
