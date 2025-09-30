@@ -451,60 +451,128 @@ object Main {
     } 
     sparkSession.stop()
   }
-  def taskThree() = {
+  def taskThree(): Unit = {
     val sparkSession = spark.sql.SparkSession.builder()
       .appName("local").getOrCreate()
+    import sparkSession.implicits._
 
     val airportsDf = readAirports(
       sparkSession,
       Vector(
         AirportField.Id,
+        AirportField.Name,
         AirportField.Latitude,
         AirportField.Longitude
       )
-    );
-    val vertices = airportsDf.rdd.map { r =>
-        (
-          r.getAs[Long](AirportField.Id.name),
-          (
-            r.getAs[Double](AirportField.Latitude.name),
-            r.getAs[Double](AirportField.Longitude.name)
-          )
-        )
+    ).distinct().cache()
+
+    val vertices =
+      airportsDf.rdd.map { r =>
+        val id  = r.getAs[Long](AirportField.Id.name)
+        val lat = r.getAs[Double](AirportField.Latitude.name)
+        val lon = r.getAs[Double](AirportField.Longitude.name)
+        (id, (lat, lon))
       }
-    
-    val airportCoordMap = airportsDf.rdd.map{ r =>
+
+    val id2name = airportsDf
+      .select($"id", $"name")
+      .as[(Long, String)]
+      .collect()
+      .toMap
+
+    val bId2name = sparkSession.sparkContext.broadcast(id2name)
+
+    val coordMap = vertices.collectAsMap()
+    val bCoord   = sparkSession.sparkContext.broadcast(coordMap)
+
+    val routesDf = readRoutes(
+      sparkSession,
+      Vector(RouteField.SourceAirportId, RouteField.DestAirportId)
+    ).distinct().cache()
+
+    val edges = routesDf.rdd.flatMap { r =>
+      val srcId = r.getAs[Long]("src_id")
+      val dstId = r.getAs[Long]("dest_id")
+      (bCoord.value.get(srcId), bCoord.value.get(dstId)) match {
+        case (Some((slat, slon)), Some((dlat, dlon))) =>
+          val dist = haversineKm(slat, slon, dlat, dlon)
+          if (!dist.isNaN && dist > 0.0) Some(spark.graphx.Edge(srcId, dstId, dist)) else None
+        case _ => None
+      }
+    }
+
+    val graph = spark.graphx.Graph(vertices, edges).cache()
+
+    import org.apache.spark.rdd.RDD
+    def shortestAndLongestPaths(
+        graph: spark.graphx.Graph[(Double, Double), Double],
+        srcId: Long,
+        dstId: Long,
+        maxHops: Int = 3
+    ): (Option[(Seq[Long], Double)], Option[(Seq[Long], Double)]) = {
+
+      val sc = graph.vertices.sparkContext
+
+      val adj = graph.edges
+        .map(e => (e.srcId, (e.dstId, e.attr)))
+        .groupByKey()
+        .mapValues(_.toArray)
+        .collectAsMap()
+      val bAdj = sc.broadcast(adj)
+
+      var frontier = sc.parallelize(Seq((Vector(srcId), 0.0)))
+      var results = sc.emptyRDD[(Vector[Long], Double)]
+
+      for (_ <- 1 to maxHops) {
+        val expanded = frontier.flatMap { case (path, d) =>
+          val last = path.last
+          bAdj.value
+            .getOrElse(last, Array.empty[(Long, Double)])
+            .iterator
+            .filter { case (nxt, _) => !path.contains(nxt) }
+            .map   { case (nxt, w)  => (path :+ nxt, d + w) }
+        }.persist()
+
+        val hits = expanded.filter { case (p, _) => p.last == dstId }
+        results = results.union(hits)
+
+        frontier = expanded.filter { case (p, _) => p.last != dstId }
+      }
+
+      val shortest = results.takeOrdered(1)(Ordering.by(_._2)).headOption
+      val longest  = results.takeOrdered(1)(Ordering.by(-_._2)).headOption
+
       (
-        r.getAs[Long](AirportField.Id.name),
-        (
-          r.getAs[Double](AirportField.Latitude.name),
-          r.getAs[Double](AirportField.Longitude.name)
-        )
+        shortest.map{ case (p, d) => (p.toSeq, d) },
+        longest .map{ case (p, d) => (p.toSeq, d) }
       )
     }
-    .collectAsMap();
-        
-    val edges = readRoutes(
-      sparkSession,
-        Vector(
-          RouteField.SourceAirportId,
-          RouteField.DestAirportId
-        )
-      )
-      .rdd.flatMap { r =>
-        val srcId = r.getLong(1)
-        val dstId = r.getLong(2)
-        (airportCoordMap.get(srcId), airportCoordMap.get(dstId)) match {
-          case (Some((slat, slon)), Some((dlat, dlon))) =>
-            val dist = haversineKm(slat, slon, dlat, dlon)
-            if (dist.isNaN || dist <= 0.0) None
-            else Some(spark.graphx.Edge(srcId, dstId, dist))
-          case _ => None
-        }
-      }
-    
-    val graph = spark.graphx.Graph(vertices, edges)
+
+    val srcId = 679
+    val dstId = 1382
+
+    val (shortestOpt, longestOpt) = shortestAndLongestPaths(graph, srcId, dstId, maxHops = 3)
+
+    def fmtPath(p: Seq[Long]): String =
+      p.map(id => s"$id:${bId2name.value.getOrElse(id, "???")}").mkString(" -> ")
+
+    shortestOpt match {
+      case Some((path, km)) =>
+        println(f"[shortest ≤3 hops]\n  ${fmtPath(path)}\n  total = $km%.2f km")
+      case None =>
+        println("Немає маршруту ≤3 ребер між заданими аеропортами (shortest).")
+    }
+
+    longestOpt match {
+      case Some((path, km)) =>
+        println(f"[longest ≤3 hops]\n  ${fmtPath(path)}\n  total = $km%.2f km")
+      case None =>
+        println("Немає маршруту ≤3 ребер між заданими аеропортами (longest).")
+    }
+
+    sparkSession.stop()
   }
+
   def taskFive() = {
     val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
     val airportsDf = readAirports(
@@ -683,7 +751,8 @@ object Main {
     sparkSession.stop()
   }
   def main(args: Array[String]): Unit = {
-    taskSevenLabelPropagation()
+    taskThree()
+    // taskSevenLabelPropagation()
     // taskSevenConnectedComponents()
   }
 }
