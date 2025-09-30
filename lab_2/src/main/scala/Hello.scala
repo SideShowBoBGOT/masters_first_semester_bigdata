@@ -653,6 +653,7 @@ object Main {
   }
   def taskSevenLabelPropagation() = {
 
+
   }
   def main(args: Array[String]): Unit = {
     taskSevenConnectedComponents()
