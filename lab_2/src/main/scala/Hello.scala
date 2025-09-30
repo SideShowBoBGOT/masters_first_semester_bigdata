@@ -601,8 +601,11 @@ object Main {
     topN: Int = 10
   ): Unit = {
 
-    val filteredComponentIds = airportIdWithComponentIdRdd.map { case (_, cid) => (cid, 1) }.reduceByKey(_ + _)
-      .filter { case (cid, sz) => sz >= minSize }
+    val componentIdSizeRdd = airportIdWithComponentIdRdd.map { case (_, cid) => (cid, 1) }.reduceByKey(_ + _)
+    val largestComponentId = componentIdSizeRdd.max()(Ordering.by(_._2))._1
+
+    val filteredComponentIds = componentIdSizeRdd
+      .filter { case (cid, sz) => sz >= minSize && cid != largestComponentId }
       .map(_._1)
 
     airportIdWithComponentIdRdd.map { case (airportId, componentId) => (componentId, airportId) }
@@ -624,7 +627,6 @@ object Main {
   def taskSevenConnectedComponents() = {
     val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
     import sparkSession.implicits._
-
     val airportsDf = readAirports(
       sparkSession,
       Vector(
@@ -647,19 +649,41 @@ object Main {
       spark.graphx.Edge(r.getLong(0), r.getLong(1), ())
     }
     val graph = spark.graphx.Graph(vertices, edges)
-    val cc = graph.connectedComponents().vertices
-    showClusters(cc, vertices, "connectedComponents")
+    val airportIdWithComponentIdRdd = graph.connectedComponents().vertices
+    showClusters(airportIdWithComponentIdRdd, vertices, "connectedComponents")
     sparkSession.stop()
   }
   def taskSevenLabelPropagation() = {
+    val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
+    import sparkSession.implicits._
+    val airportsDf = readAirports(
+      sparkSession,
+      Vector(
+        AirportField.Id,
+        AirportField.Name,
+        AirportField.Country
+      )
+    )
+    val vertices = airportsDf.rdd.map { r =>
+      (r.getLong(0), (r.getString(1), r.getString(2)))
+    }
+    val edges = readRoutes(
+      sparkSession,
+        Vector(
+          RouteField.SourceAirportId,
+          RouteField.DestAirportId
+        )
+    ).rdd.map { r =>
+      spark.graphx.Edge(r.getLong(0), r.getLong(1), ())
+    }
+    val graph = spark.graphx.Graph(vertices, edges)
+    val airportIdWithComponentIdRdd = spark.graphx.lib.LabelPropagation.run(graph, maxSteps = 100).vertices
 
-
+    showClusters(airportIdWithComponentIdRdd, vertices, "LabelPropagation")
+    sparkSession.stop()
   }
   def main(args: Array[String]): Unit = {
-    taskSevenConnectedComponents()
-    // taskFive()
-    // taskSix()
-    // taskTwoGraphFrames()
-    // taskTwoSql()
+    taskSevenLabelPropagation()
+    // taskSevenConnectedComponents()
   }
 }
