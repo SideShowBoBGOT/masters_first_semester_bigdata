@@ -558,16 +558,16 @@ object Main {
 
     shortestOpt match {
       case Some((path, km)) =>
-        println(f"[shortest ≤3 hops]\n  ${fmtPath(path)}\n  total = $km%.2f km")
+        println(f"[shortest <=3 hops]\n  ${fmtPath(path)}\n  total = $km%.2f km")
       case None =>
-        println("Немає маршруту ≤3 ребер між заданими аеропортами (shortest).")
+        println("No path (shortest).")
     }
 
     longestOpt match {
       case Some((path, km)) =>
-        println(f"[longest ≤3 hops]\n  ${fmtPath(path)}\n  total = $km%.2f km")
+        println(f"[longest <=3 hops]\n  ${fmtPath(path)}\n  total = $km%.2f km")
       case None =>
-        println("Немає маршруту ≤3 ребер між заданими аеропортами (longest).")
+        println("No path (longest).")
     }
 
     sparkSession.stop()
@@ -751,7 +751,12 @@ object Main {
     sparkSession.stop()
   }
   def main(args: Array[String]): Unit = {
-    taskThree()
+    taskOne()
+    // taskTwoSql()
+    // taskTwoGraphFrames()
+    // taskThree()
+    // taskFive()
+    // taskSix()
     // taskSevenLabelPropagation()
     // taskSevenConnectedComponents()
   }
