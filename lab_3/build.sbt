@@ -7,7 +7,8 @@ lazy val root = (project in file("."))
   .settings(
     libraryDependencies ++= Seq(
       ("org.apache.spark" %% "spark-core" % sparkV % "provided").cross(CrossVersion.for3Use2_13),
-      ("org.apache.spark" %% "spark-sql" % sparkV % "provided").cross(CrossVersion.for3Use2_13)
+      ("org.apache.spark" %% "spark-sql" % sparkV % "provided").cross(CrossVersion.for3Use2_13),
+      ("org.apache.spark" %% "spark-mllib" % sparkV % "provided").cross(CrossVersion.for3Use2_13),
     ),
     Compile / run / fork := true,
     Compile / run / javaOptions ++= Seq(
