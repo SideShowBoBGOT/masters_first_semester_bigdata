@@ -1,3 +1,4 @@
+DESCRIPTION_URL:=https://www.kaggle.com/datasets/zhaxidelebsz/10-gym-exercises-with-615-abstracted-features/data
 TRAIN_DATA_DIR:=$(CURDIR)/traindata
 ARCHIVE:=$(TRAIN_DATA_DIR)/data.zip
 UNPACKED_DATA:=$(TRAIN_DATA_DIR)/RecGym.csv
