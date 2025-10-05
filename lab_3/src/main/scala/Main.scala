@@ -71,102 +71,106 @@ def testClassificationLogisticRegression(
   val positionIndexerColumn = DataColumns.Position.value + "indexer"
   val positionHotEncoderColumn = DataColumns.Position.value + "hotEncoder"
   val workoutIndexerColumn = DataColumns.Workout.value + "indexer"
-  val positionStringIndexer = spark.ml.feature.StringIndexer()
-    .setInputCol(DataColumns.Position.value) 
+
+  val positionStringIndexer = new spark.ml.feature.StringIndexer()
+    .setInputCol(DataColumns.Position.value)
     .setOutputCol(positionIndexerColumn)
     .setHandleInvalid("keep")
-  val workoutStringIndexer = spark.ml.feature.StringIndexer()
-    .setInputCol(DataColumns.Workout.value) 
+
+  val workoutStringIndexer = new spark.ml.feature.StringIndexer()
+    .setInputCol(DataColumns.Workout.value)
     .setOutputCol(workoutIndexerColumn)
     .setHandleInvalid("keep")
+
   val numericCols = Array(
-    DataColumns.Ax.value
-    , DataColumns.Ay.value
-    , DataColumns.Az.value
-    , DataColumns.Gx.value
-    , DataColumns.Gy.value
-    , DataColumns.Gz.value
-    , DataColumns.BodyCapacitance.value
+    DataColumns.Ax.value,
+    DataColumns.Ay.value,
+    DataColumns.Az.value,
+    DataColumns.Gx.value,
+    DataColumns.Gy.value,
+    DataColumns.Gz.value,
+    DataColumns.BodyCapacitance.value
   )
-  val assembeledNumericColumn = "assembeledNumericColumns"
+
+  val assembledNumericColumn = "assembledNumericColumns"
   val scaledNumericColumn = "scaledNumericColumn"
-  val assembeledFeatures = "assembeledFeatures"
+  val assembledFeatures = "assembledFeatures"
   val kFolds = 5
 
-  val classifier = spark.ml.classification.LogisticRegression()
-    .setFeaturesCol(assembeledFeatures)
+  val classifier = new spark.ml.classification.LogisticRegression()
+    .setFeaturesCol(assembledFeatures)
     .setLabelCol(workoutIndexerColumn)
     .setMaxIter(100)
     .setFamily("multinomial")
     .setStandardization(false)
 
-  val grid = spark.ml.tuning.ParamGridBuilder()
+  val grid = new spark.ml.tuning.ParamGridBuilder()
     .addGrid(classifier.regParam, Array(0.0, 1e-1))
     .addGrid(classifier.elasticNetParam, Array(0.0, 1.0))
-    // .addGrid(classifier.regParam, Array(0.0, 1e-2, 1e-1))
-    // .addGrid(classifier.elasticNetParam, Array(0.0, 0.5, 1.0))
-    // .addGrid(classifier.elasticNetParam, Array(0.0))
     .build()
-  
-  val estimator = spark.ml.Pipeline()
+
+  val preprocessPipeline = new spark.ml.Pipeline()
     .setStages(
       Array(
-        positionStringIndexer
-        , spark.ml.feature.OneHotEncoder()
+        positionStringIndexer,
+        new spark.ml.feature.OneHotEncoder()
           .setInputCol(positionIndexerColumn)
           .setOutputCol(positionHotEncoderColumn)
-          .setHandleInvalid("keep")
-        , workoutStringIndexer
-        , spark.ml.feature.VectorAssembler()
+          .setHandleInvalid("keep"),
+        workoutStringIndexer,
+        new spark.ml.feature.VectorAssembler()
           .setInputCols(numericCols)
-          .setOutputCol(assembeledNumericColumn)
-        , spark.ml.feature.StandardScaler()
-          .setInputCol(assembeledNumericColumn)
-          .setOutputCol(scaledNumericColumn)
-        , spark.ml.feature.VectorAssembler()
+          .setOutputCol(assembledNumericColumn),
+        new spark.ml.feature.StandardScaler()
+          .setInputCol(assembledNumericColumn)
+          .setOutputCol(scaledNumericColumn),
+        new spark.ml.feature.VectorAssembler()
           .setInputCols(Array(scaledNumericColumn, positionHotEncoderColumn))
-          .setOutputCol(assembeledFeatures)
-        , classifier
+          .setOutputCol(assembledFeatures)
       )
     )
 
-  val f1Eval = spark.ml.evaluation.MulticlassClassificationEvaluator()
-      .setLabelCol(workoutIndexerColumn)
-      .setPredictionCol("prediction")
-      .setMetricName("f1")
+  val preprocessModel = preprocessPipeline.fit(data)
+  val preprocessedData = preprocessModel.transform(data)
 
-  val cvF1 = spark.ml.tuning.CrossValidator()
-      .setEstimator(estimator)
-      .setEvaluator(f1Eval)
-      .setEstimatorParamMaps(grid)
-      .setNumFolds(kFolds)
-      .setSeed(seed)
+  val f1Eval = new spark.ml.evaluation.MulticlassClassificationEvaluator()
+    .setLabelCol(workoutIndexerColumn)
+    .setPredictionCol("prediction")
+    .setMetricName("f1")
 
-  val cached = data.cache()
-  val cvModelF1 = cvF1.fit(cached)
+  val cvF1 = new spark.ml.tuning.CrossValidator()
+    .setEstimator(classifier)
+    .setEvaluator(f1Eval)
+    .setEstimatorParamMaps(grid)
+    .setNumFolds(kFolds)
+    .setSeed(seed)
+
+  val Array(trainData, testData) = preprocessedData.randomSplit(Array(0.7, 0.3), seed = seed)
+  val cvModelF1 = cvF1.fit(trainData)
   val bestF1 = cvModelF1.avgMetrics.max
-  
-  val predsForROC = cvModelF1.bestModel.transform(cached)
+  val predsForROC = cvModelF1.bestModel.transform(testData)
+
   exportPerClassROC(sparkSession, predsForROC, workoutIndexerColumn, "build/logisticRegressionRocs") 
 
-  val accEval = spark.ml.evaluation.MulticlassClassificationEvaluator()
+  val accEval = new spark.ml.evaluation.MulticlassClassificationEvaluator()
     .setLabelCol(workoutIndexerColumn)
     .setPredictionCol("prediction")
     .setMetricName("accuracy")
 
-  val cvACC = spark.ml.tuning.CrossValidator()
-    .setEstimator(estimator)
+  val cvACC = new spark.ml.tuning.CrossValidator()
+    .setEstimator(classifier)
     .setEvaluator(accEval)
     .setEstimatorParamMaps(grid)
     .setNumFolds(kFolds)
     .setSeed(seed)
 
-  val cvModelACC = cvACC.fit(cached)
+  val cvModelACC = cvACC.fit(trainData)
+
   val bestACC = cvModelACC.avgMetrics.max
 
-  val file = java.io.File("build/classificationLogisticRegression.txt")
+  val file = new java.io.File("build/classificationLogisticRegression.txt")
   file.getParentFile.mkdirs()
-  val writer = java.io.PrintWriter(java.io.FileWriter(file, true))
+  val writer = new java.io.PrintWriter(new java.io.FileWriter(file, true))
   writer.println(f"[LR][CV] mean-F1 (best-by-F1): $bestF1%.4f")
   writer.println(f"[LR][CV] mean-ACC (best-by-ACC): $bestACC%.4f")
   writer.close()
@@ -178,94 +182,157 @@ def testClassificationRandomForest(
 ) =
   val positionIndexerColumn = DataColumns.Position.value + "indexer"
   val workoutIndexerColumn = DataColumns.Workout.value + "indexer"
-  val positionStringIndexer = spark.ml.feature.StringIndexer()
-    .setInputCol(DataColumns.Position.value) 
+  val positionStringIndexer = new spark.ml.feature.StringIndexer()
+    .setInputCol(DataColumns.Position.value)
     .setOutputCol(positionIndexerColumn)
     .setHandleInvalid("keep")
-  val workoutStringIndexer = spark.ml.feature.StringIndexer()
-    .setInputCol(DataColumns.Workout.value) 
+  val workoutStringIndexer = new spark.ml.feature.StringIndexer()
+    .setInputCol(DataColumns.Workout.value)
     .setOutputCol(workoutIndexerColumn)
     .setHandleInvalid("keep")
   val numericCols = Array(
-    DataColumns.Ax.value
-    , DataColumns.Ay.value
-    , DataColumns.Az.value
-    , DataColumns.Gx.value
-    , DataColumns.Gy.value
-    , DataColumns.Gz.value
-    , DataColumns.BodyCapacitance.value
+    DataColumns.Ax.value,
+    DataColumns.Ay.value,
+    DataColumns.Az.value,
+    DataColumns.Gx.value,
+    DataColumns.Gy.value,
+    DataColumns.Gz.value,
+    DataColumns.BodyCapacitance.value
   )
-  val assembeledFeatures = "assembeledFeatures"
+  val assembledFeatures = "assembledFeatures"
   val kFolds = 5
 
-  val classifier = spark.ml.classification.RandomForestClassifier()
-    .setFeaturesCol(assembeledFeatures)
+  val classifier = new spark.ml.classification.RandomForestClassifier()
+    .setFeaturesCol(assembledFeatures)
     .setLabelCol(workoutIndexerColumn)
     .setNumTrees(100)
     .setSeed(seed)
 
-  val grid = spark.ml.tuning.ParamGridBuilder()
-    // .addGrid(classifier.numTrees, Array(100, 200))
-    // .addGrid(classifier.maxDepth, Array(10, 15, 20))
-    // .addGrid(classifier.featureSubsetStrategy, Array("sqrt", "log2"))
+  val grid = new spark.ml.tuning.ParamGridBuilder()
     .addGrid(classifier.numTrees, Array(40, 70, 100, 130))
-    // .addGrid(classifier.maxDepth, Array(10, 15))
-    // .addGrid(classifier.featureSubsetStrategy, Array("sqrt", "log2"))
     .build()
-  
-  val estimator = spark.ml.Pipeline()
+
+  val preprocessPipeline = new spark.ml.Pipeline()
     .setStages(
       Array(
-        positionStringIndexer
-        , workoutStringIndexer
-        , spark.ml.feature.VectorAssembler()
+        positionStringIndexer,
+        workoutStringIndexer,
+        new spark.ml.feature.VectorAssembler()
           .setInputCols(numericCols ++ Array(workoutIndexerColumn))
-          .setOutputCol(assembeledFeatures)
-        , classifier
+          .setOutputCol(assembledFeatures)
       )
     )
 
-  val f1Eval = spark.ml.evaluation.MulticlassClassificationEvaluator()
-      .setLabelCol(workoutIndexerColumn)
-      .setPredictionCol("prediction")
-      .setMetricName("f1")
+  val preprocessModel = preprocessPipeline.fit(data)
+  val preprocessedData = preprocessModel.transform(data)
 
-  val cvF1 = spark.ml.tuning.CrossValidator()
-      .setEstimator(estimator)
-      .setEvaluator(f1Eval)
-      .setEstimatorParamMaps(grid)
-      .setNumFolds(kFolds)
-      .setSeed(seed)
+  val f1Eval = new spark.ml.evaluation.MulticlassClassificationEvaluator()
+    .setLabelCol(workoutIndexerColumn)
+    .setPredictionCol("prediction")
+    .setMetricName("f1")
 
-  val cached = data.cache()
-  val cvModelF1 = cvF1.fit(cached)
+  val cvF1 = new spark.ml.tuning.CrossValidator()
+    .setEstimator(classifier)
+    .setEvaluator(f1Eval)
+    .setEstimatorParamMaps(grid)
+    .setNumFolds(kFolds)
+    .setSeed(seed)
+
+  val Array(trainData, testData) = preprocessedData.randomSplit(Array(0.7, 0.3), seed = seed)
+  val cvModelF1 = cvF1.fit(trainData)
   val bestF1 = cvModelF1.avgMetrics.max
-  
-  val predsForROC = cvModelF1.bestModel.transform(cached)
+  val predsForROC = cvModelF1.bestModel.transform(testData)
+
   exportPerClassROC(sparkSession, predsForROC, workoutIndexerColumn, "build/randomForestRocs") 
 
-  val accEval = spark.ml.evaluation.MulticlassClassificationEvaluator()
+  val accEval = new spark.ml.evaluation.MulticlassClassificationEvaluator()
     .setLabelCol(workoutIndexerColumn)
     .setPredictionCol("prediction")
     .setMetricName("accuracy")
 
-  val cvACC = spark.ml.tuning.CrossValidator()
-    .setEstimator(estimator)
+  val cvACC = new spark.ml.tuning.CrossValidator()
+    .setEstimator(classifier)
     .setEvaluator(accEval)
     .setEstimatorParamMaps(grid)
     .setNumFolds(kFolds)
     .setSeed(seed)
 
-  val cvModelACC = cvACC.fit(cached)
+  val cvModelACC = cvACC.fit(trainData)
+
   val bestACC = cvModelACC.avgMetrics.max
 
-  val file = java.io.File("build/classificationRandomForest.txt")
+  val file = new java.io.File("build/classificationRandomForest.txt")
   file.getParentFile.mkdirs()
-  val writer = java.io.PrintWriter(java.io.FileWriter(file, true))
+  val writer = new java.io.PrintWriter(new java.io.FileWriter(file, true))
   writer.println(f"[RF][CV] mean-F1 (best-by-F1): $bestF1%.4f")
   writer.println(f"[RF][CV] mean-ACC (best-by-ACC): $bestACC%.4f")
   writer.close()
- 
+
+def testClusterizationKmeans(
+  sparkSession: spark.sql.SparkSession,
+  data: spark.sql.DataFrame,
+  seed: Long
+) = {
+  val assembler = new spark.ml.feature.VectorAssembler()
+    .setInputCols(
+      Array(
+        DataColumns.Gx.value,
+        DataColumns.Gy.value,
+        DataColumns.Gz.value
+      )
+    )
+    .setOutputCol("features")
+
+  val assembledData = assembler.transform(data)
+  val Array(trainData, testData) = assembledData.randomSplit(Array(0.7, 0.3), seed = seed)
+
+  (2 until 12).foreach { k =>
+    val kMeans = new spark.ml.clustering.KMeans().setK(k).setSeed(seed)
+    val kMeansModel = kMeans.fit(trainData)
+    val predictions = kMeansModel.transform(testData)
+    val evaluator = new spark.ml.evaluation.ClusteringEvaluator()
+    val score = evaluator.evaluate(predictions)
+    val file = new java.io.File(s"build/clusterizationKmeans/$k.txt")
+    file.getParentFile.mkdirs()
+    val writer = new java.io.PrintWriter(new java.io.FileWriter(file, true))
+    writer.println(f"score=$score")
+    writer.close()
+  }
+}
+
+def testClusterizationGaussianMixture(
+  sparkSession: spark.sql.SparkSession,
+  data: spark.sql.DataFrame,
+  seed: Long
+) = {
+  val assembler = new spark.ml.feature.VectorAssembler()
+    .setInputCols(
+      Array(
+        DataColumns.Gx.value,
+        DataColumns.Gy.value,
+        DataColumns.Gz.value
+      )
+    )
+    .setOutputCol("features")
+
+  val assembledData = assembler.transform(data)
+  val Array(trainData, testData) = assembledData.randomSplit(Array(0.7, 0.3), seed = seed)
+
+  (2 until 12).foreach { k =>
+    val clusterizationAlg = new spark.ml.clustering.GaussianMixture().setK(k).setSeed(seed)
+    val model = clusterizationAlg.fit(trainData)
+    val predictions = model.transform(testData)
+    val evaluator = new spark.ml.evaluation.ClusteringEvaluator()
+    val score = evaluator.evaluate(predictions)
+    val file = new java.io.File(s"build/clusterizationGaussianMixture/$k.txt")
+    file.getParentFile.mkdirs()
+    val writer = new java.io.PrintWriter(new java.io.FileWriter(file, true))
+    writer.println(f"score=$score")
+    writer.close()
+  }
+}
+
+
 @main def main() =
   val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
   import sparkSession.implicits._
@@ -286,17 +353,14 @@ def testClassificationRandomForest(
       , DataColumns.Gz.col.cast(spark.sql.types.DoubleType)
       , DataColumns.BodyCapacitance.col.cast(spark.sql.types.DoubleType)
       , DataColumns.Workout.col.cast(spark.sql.types.StringType),
-    )
-  val targetN = 100000
+    ).cache()
+  val targetN = 500000
   val total = data.count()
   val fraction = math.min(1.0, targetN.toDouble / total.toDouble)
   val sample = data.sample(false, fraction, seed).limit(targetN).cache()
-  // sample.write
-  //   .mode("overwrite")
-  //   .option("header", "true")
-  //   .option("quoteAll", "true")
-  //   .csv("traindata/sample.csv")
-  testClassificationLogisticRegression(sparkSession, sample, seed)
+  // testClassificationLogisticRegression(sparkSession, sample, seed)
   testClassificationRandomForest(sparkSession, sample, seed)
+  // testClusterizationKmeans(sparkSession, sample, seed)
+  // testClusterizationGaussianMixture(sparkSession, sample, seed)
   sparkSession.stop()
 
