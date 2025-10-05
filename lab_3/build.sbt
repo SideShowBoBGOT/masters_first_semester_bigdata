@@ -6,9 +6,10 @@ val sparkV = "3.5.3"
 lazy val root = (project in file("."))
   .settings(
     libraryDependencies ++= Seq(
-      ("org.apache.spark" %% "spark-core" % sparkV % "provided").cross(CrossVersion.for3Use2_13),
-      ("org.apache.spark" %% "spark-sql" % sparkV % "provided").cross(CrossVersion.for3Use2_13),
-      ("org.apache.spark" %% "spark-mllib" % sparkV % "provided").cross(CrossVersion.for3Use2_13),
+      ("org.apache.spark" %% "spark-core" % sparkV % "provided").cross(CrossVersion.for3Use2_13)
+      , ("org.apache.spark" %% "spark-sql" % sparkV % "provided").cross(CrossVersion.for3Use2_13)
+      , ("org.apache.spark" %% "spark-mllib" % sparkV % "provided").cross(CrossVersion.for3Use2_13)
+      , ("org.knowm.xchart" % "xchart" % "3.8.8")
     ),
     Compile / run / fork := true,
     Compile / run / javaOptions ++= Seq(

@@ -1,4 +1,5 @@
 import org.apache.{spark => spark}
+import org.knowm.{xchart => xchart}
 
 // def buildPreprocessingPipeline(
 //   useScalingForLR: Boolean = true,
@@ -162,7 +163,54 @@ enum DataColumns(val value: String):
 
   def col = spark.sql.functions.col(this.value)
 
-def testLogisticRegression(data: spark.sql.DataFrame) =
+def exportPerClassROC(
+  predictions: spark.sql.DataFrame,
+  labelColumnName: String, 
+  sparkSession: spark.sql.SparkSession
+) = 
+  val outDir = "build/rocs"
+  val labelColumn = spark.sql.functions.col(labelColumnName)
+  val numClasses = predictions
+    .select(labelColumn)
+    .agg(spark.sql.functions.max(labelColumn))
+    .head()
+    .getDouble(0)
+    .toInt + 1
+
+  (0 until numClasses).foreach { c =>
+    val scoreAndLabel =
+      predictions
+        .select(spark.sql.functions.col("probability"), labelColumn.cast(spark.sql.types.DoubleType))
+        .rdd
+        .map { row =>
+          val prob = row.getAs[org.apache.spark.ml.linalg.Vector]("probability")
+          val lab  = row.getDouble(1)
+          val scoreForC = prob(c)
+          val binLabel  = if (lab == c.toDouble) 1.0 else 0.0
+          (scoreForC, binLabel)
+        }
+    val metrics = spark.mllib.evaluation.BinaryClassificationMetrics(scoreAndLabel)
+    val rocPoints = metrics.roc().collect()
+    val xs = rocPoints.map(_._1).toArray
+    val ys = rocPoints.map(_._2).toArray
+    val auc = metrics.areaUnderROC()
+    val chart = xchart.XYChartBuilder()
+      .width(1920)
+      .height(1080)
+      .title(s"ROC (class $c) AUC=${"%.4f".format(auc)}")
+      .xAxisTitle("False Positive Rate")
+      .yAxisTitle("True Positive Rate")
+      .build()
+    val series = chart.addSeries("ROC", xs, ys)
+    series.setMarker(xchart.style.markers.None())
+    chart
+      .addSeries("Random", Array(0.0, 1.0), Array(0.0, 1.0))
+      .setMarker(xchart.style.markers.None())
+    java.io.File(outDir).mkdirs()
+    xchart.BitmapEncoder.saveBitmap(chart, s"$outDir/roc_class_$c", xchart.BitmapEncoder.BitmapFormat.PNG)
+  }
+
+def testLogisticRegression(sparkSession: spark.sql.SparkSession, data: spark.sql.DataFrame, seed: Long) =
 
   val positionIndexerColumn = DataColumns.Position.value + "indexer"
   val positionHotEncoderColumn = DataColumns.Position.value + "hotEncoder"
@@ -187,10 +235,22 @@ def testLogisticRegression(data: spark.sql.DataFrame) =
   val assembeledNumericColumn = "assembeledNumericColumns"
   val scaledNumericColumn = "scaledNumericColumn"
   val assembeledFeatures = "assembeledFeatures"
-  val seed = 1L
   val kFolds = 5
 
-  val preprocessingPipeline = spark.ml.Pipeline()
+  val classifier = spark.ml.classification.LogisticRegression()
+    .setFeaturesCol(assembeledFeatures)
+    .setLabelCol(workoutIndexerColumn)
+    .setMaxIter(100)
+    .setFamily("multinomial")
+    .setStandardization(false)
+
+  val grid = spark.ml.tuning.ParamGridBuilder()
+    // .addGrid(classifier.regParam, Array(0.0, 1e-2, 1e-1))
+    // .addGrid(classifier.elasticNetParam, Array(0.0, 0.5, 1.0))
+    .addGrid(classifier.elasticNetParam, Array(0.0))
+    .build()
+  
+  val estimator = spark.ml.Pipeline()
     .setStages(
       Array(
         positionStringIndexer
@@ -208,23 +268,9 @@ def testLogisticRegression(data: spark.sql.DataFrame) =
         , spark.ml.feature.VectorAssembler()
           .setInputCols(Array(scaledNumericColumn, positionHotEncoderColumn))
           .setOutputCol(assembeledFeatures)
+        , classifier
       )
     )
-
-  val classifier = spark.ml.classification.LogisticRegression()
-    .setFeaturesCol(assembeledFeatures)
-    .setLabelCol(workoutIndexerColumn)
-    .setMaxIter(100)
-    .setFamily("multinomial")
-    .setStandardization(false)
-
-  val grid = spark.ml.tuning.ParamGridBuilder()
-    .addGrid(classifier.regParam, Array(0.0, 1e-2, 1e-1))
-    .addGrid(classifier.elasticNetParam, Array(0.0, 0.5, 1.0))
-    .build()
-  
-  val estimator = spark.ml.Pipeline()
-    .setStages(Array(preprocessingPipeline, classifier))
 
   val f1Eval = spark.ml.evaluation.MulticlassClassificationEvaluator()
       .setLabelCol(workoutIndexerColumn)
@@ -238,12 +284,12 @@ def testLogisticRegression(data: spark.sql.DataFrame) =
       .setNumFolds(kFolds)
       .setSeed(seed)
 
-  val cached = data.na.drop().cache()
+  val cached = data.cache()
   val cvModelF1 = cvF1.fit(cached)
   val bestF1 = cvModelF1.avgMetrics.max
   
   val predsForROC = cvModelF1.bestModel.transform(cached)
-  exportPerClassROC(predsForROC, workoutIndexerColumn, outDir = "out/roc_lr")
+  exportPerClassROC(predsForROC, workoutIndexerColumn, sparkSession) 
 
   val accEval = spark.ml.evaluation.MulticlassClassificationEvaluator()
     .setLabelCol(workoutIndexerColumn)
@@ -260,6 +306,7 @@ def testLogisticRegression(data: spark.sql.DataFrame) =
   val cvModelACC = cvACC.fit(cached)
   val bestACC = cvModelACC.avgMetrics.max
 
+  println(s"columns ${predsForROC.columns}")
   println(f"[LR][CV] mean-F1 (best-by-F1): $bestF1%.4f")
   println(f"[LR][CV] mean-ACC (best-by-ACC): $bestACC%.4f")
 
@@ -267,7 +314,8 @@ def testLogisticRegression(data: spark.sql.DataFrame) =
 @main def main() =
   val sparkSession = spark.sql.SparkSession.builder().appName("local").getOrCreate()
   import sparkSession.implicits._
-  val fff = sparkSession.read.options(Map(
+  val seed = 12321L
+  val data = sparkSession.read.options(Map(
       "header" -> "true"
     ))
     .csv("traindata/RecGym.csv")
@@ -284,84 +332,15 @@ def testLogisticRegression(data: spark.sql.DataFrame) =
       , DataColumns.BodyCapacitance.col.cast(spark.sql.types.DoubleType)
       , DataColumns.Workout.col.cast(spark.sql.types.StringType),
     )
-
-  val positionIndexerColumn = DataColumns.Position.value + "indexer"
-  val rawFeaturesColumn = "rawFeatures"
-
-  val positionStringIndexer = spark.ml.feature.StringIndexer()
-    .setInputCol(DataColumns.Position.value) 
-    .setOutputCol(positionIndexerColumn)
-    .setHandleInvalid("keep")
-  
-  val workoutIndexerColumn = DataColumns.Workout.value + "indexer"
-  val workoutStringIndexer = spark.ml.feature.StringIndexer()
-    .setInputCol(DataColumns.Workout.value) 
-    .setOutputCol(workoutIndexerColumn)
-    .setHandleInvalid("keep")
-
-  val numbericCols = Array(
-    DataColumns.Ax.value
-    , DataColumns.Ay.value
-    , DataColumns.Az.value
-    , DataColumns.Gx.value
-    , DataColumns.Gy.value
-    , DataColumns.Gz.value
-    , DataColumns.BodyCapacitance.value
-  )
-  enum ClassificationType:
-    case Logistic, RandomForest
-
-  inline val classificationType = ClassificationType.Logistic
-
-  val seed = 1
-
-  val pipeline = spark.ml.Pipeline()
-    .setStages(
-      classificationType match
-        case ClassificationType.Logistic =>
-          val positionHotEncoderColumn = DataColumns.Position.value + "hotEncoder"
-          val scaledFeaturesRawColumn = "scaledFeatures"
-          Array(
-            positionStringIndexer
-            , spark.ml.feature.OneHotEncoder()
-              .setInputCol(positionIndexerColumn)
-              .setOutputCol(positionHotEncoderColumn)
-            , workoutStringIndexer
-            , spark.ml.feature.VectorAssembler()
-              .setInputCols(Array(positionHotEncoderColumn) ++ numbericCols)
-              .setOutputCol(rawFeaturesColumn)
-            , spark.ml.feature.StandardScaler()
-              .setInputCol(rawFeaturesColumn)
-              .setOutputCol(scaledFeaturesRawColumn)
-            , spark.ml.classification.LogisticRegression()
-              .setFeaturesCol(scaledFeaturesRawColumn)
-              .setLabelCol(workoutIndexerColumn)
-              .setMaxIter(100)
-              .setFamily("multinomial")
-              .setStandardization(false)
-          )
-        case ClassificationType.RandomForest =>
-          Array(
-            positionStringIndexer
-            , workoutStringIndexer
-            , spark.ml.feature.VectorAssembler()
-              .setInputCols(Array(positionIndexerColumn) ++ numbericCols)
-              .setOutputCol(rawFeaturesColumn)
-            , spark.ml.classification.RandomForestClassifier()
-              .setFeaturesCol(rawFeaturesColumn)
-              .setLabelCol(workoutIndexerColumn)
-              .setNumTrees(100)
-              .setSeed(seed)
-          )
-    )
-  val paramGrid = classificationType match
-    case ClassificationType.Logistic =>
-      val paramGrid = spark.ml.tuning.ParamGridBuilder()
-        .addGrid(rf.numTrees, Array(100, 200))
-        .addGrid(rf.maxDepth, Array(10, 15, 20))
-        .addGrid(rf.featureSubsetStrategy, Array("sqrt", "log2"))
-        .build()
-    case ClassificationType.RandomForest =>
-      
+  val targetN = 1000
+  val total = data.count()
+  val fraction = math.min(1.0, targetN.toDouble / total.toDouble)
+  val sample = data.sample(false, fraction, seed).limit(targetN).cache()
+  // sample.write
+  //   .mode("overwrite")
+  //   .option("header", "true")
+  //   .option("quoteAll", "true")
+  //   .csv("traindata/sample.csv")
+  testLogisticRegression(sparkSession, sample, seed)
   sparkSession.stop()
 

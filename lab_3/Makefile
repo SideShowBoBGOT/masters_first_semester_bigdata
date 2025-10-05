@@ -19,3 +19,7 @@ $(UNPACKED_DATA): | $(ARCHIVE)
 .PHONY: clean
 clean:
 	rm -rf $(TRAIN_DATA_DIR)
+
+.PHONY: update
+update:
+	sbt reload update bloopInstall
