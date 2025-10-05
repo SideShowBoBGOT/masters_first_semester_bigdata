@@ -208,8 +208,8 @@ def testClassificationRandomForest(
     // .addGrid(classifier.numTrees, Array(100, 200))
     // .addGrid(classifier.maxDepth, Array(10, 15, 20))
     // .addGrid(classifier.featureSubsetStrategy, Array("sqrt", "log2"))
-    .addGrid(classifier.numTrees, Array(100, 200))
-    .addGrid(classifier.maxDepth, Array(10, 15))
+    .addGrid(classifier.numTrees, Array(40, 70, 100, 130))
+    // .addGrid(classifier.maxDepth, Array(10, 15))
     // .addGrid(classifier.featureSubsetStrategy, Array("sqrt", "log2"))
     .build()
   
