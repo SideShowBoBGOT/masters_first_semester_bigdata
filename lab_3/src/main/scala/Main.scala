@@ -245,9 +245,11 @@ def testLogisticRegression(sparkSession: spark.sql.SparkSession, data: spark.sql
     .setStandardization(false)
 
   val grid = spark.ml.tuning.ParamGridBuilder()
+    .addGrid(classifier.regParam, Array(0.0, 1e-1))
+    .addGrid(classifier.elasticNetParam, Array(0.0, 1.0))
     // .addGrid(classifier.regParam, Array(0.0, 1e-2, 1e-1))
     // .addGrid(classifier.elasticNetParam, Array(0.0, 0.5, 1.0))
-    .addGrid(classifier.elasticNetParam, Array(0.0))
+    // .addGrid(classifier.elasticNetParam, Array(0.0))
     .build()
   
   val estimator = spark.ml.Pipeline()
@@ -332,7 +334,7 @@ def testLogisticRegression(sparkSession: spark.sql.SparkSession, data: spark.sql
       , DataColumns.BodyCapacitance.col.cast(spark.sql.types.DoubleType)
       , DataColumns.Workout.col.cast(spark.sql.types.StringType),
     )
-  val targetN = 1000
+  val targetN = 100000
   val total = data.count()
   val fraction = math.min(1.0, targetN.toDouble / total.toDouble)
   val sample = data.sample(false, fraction, seed).limit(targetN).cache()
