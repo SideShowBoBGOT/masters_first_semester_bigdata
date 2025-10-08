@@ -1,0 +1,6 @@
+.bsp/
+**/target/
+.bloop/
+.metals/
+traindata/
+build/
